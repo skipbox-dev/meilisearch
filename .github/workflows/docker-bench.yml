@@ -1,0 +1,79 @@
+name: Docker build bench (cargo-chef + gha cache)
+
+# Bench copy of the build job of publish-docker-images.yml:
+# manual only, amd64 only, nothing is pushed anywhere.
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [amd64]
+        edition: [community, enterprise]
+        include:
+          - platform: amd64
+            runner: ubuntu-24.04
+          - edition: community
+            registry: getmeili/meilisearch
+            feature-flag: ""
+          - edition: enterprise
+            registry: getmeili/meilisearch-enterprise
+            feature-flag: "--features enterprise"
+
+    permissions: {}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Prepare
+        run: |
+          platform=linux/${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform////-}" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        with:
+          platforms: linux/${{ matrix.platform }}
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ${{ matrix.registry }}
+          flavor: latest=false
+          tags: |
+            type=ref,event=tag
+            type=raw,value=nightly,enable=${{ github.event_name != 'push' }}
+
+      - name: Build (no push)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: build-and-push
+        with:
+          platforms: linux/${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ matrix.registry }}
+          outputs: type=docker,name=bench-${{ matrix.edition }}:latest
+          # Reuse the compiled dependencies (the `cargo chef cook` layer) from the previous build of
+          # the same platform and edition. Only branch builds (nightly) write the cache; tag builds
+          # read the default branch's cache. `mode=max` is needed to export the compiler stage layers.
+          cache-from: type=gha,scope=${{ matrix.edition }}-${{ env.PLATFORM_PAIR }}
+          cache-to: ${{ github.ref_type == 'branch' && format('type=gha,mode=max,ignore-error=true,scope={0}-{1}', matrix.edition, env.PLATFORM_PAIR) || '' }}
+          # Always rebuild the runtime stage so its Alpine packages are up to date.
+          no-cache-filters: runtime
+          build-args: |
+            COMMIT_SHA=${{ github.sha }}
+            COMMIT_DATE=${{ steps.build-metadata.outputs.date }}
+            GIT_TAG=${{ github.ref_name }}
+            EXTRA_ARGS=${{ matrix.feature-flag }}
+
+      - name: Inspect the image
+        run: |
+          img=bench-${{ matrix.edition }}:latest
+          docker image inspect --format '{{json .Config}}' "$img" | jq -S 'del(.Labels["org.opencontainers.image.revision"], .Labels["org.opencontainers.image.created"])'
+          docker run --rm --entrypoint /bin/meilisearch "$img" --version
+          docker run --rm --entrypoint /bin/meilitool "$img" --version || true
+          docker run --rm --entrypoint sh "$img" -c 'ls -l /bin/meilisearch /bin/meilitool /meilisearch; apk info -v 2>/dev/null | sort'
+          cid=$(docker run -d -p 7700:7700 "$img"); for i in $(seq 1 30); do curl -fsS localhost:7700/health && break; sleep 1; done; echo; docker logs "$cid" 2>&1 | head -20; docker rm -f "$cid" >/dev/null
