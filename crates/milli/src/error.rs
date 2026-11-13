@@ -54,7 +54,7 @@ pub enum InternalError {
     Fst(#[from] fst::Error),
     #[error(transparent)]
     DocumentsError(#[from] documents::Error),
-    #[error("invalid compression type have been specified to grenad")]
+    #[error("an invalid compression type has been specified to grenad")]
     GrenadInvalidCompressionType,
     #[error("invalid grenad file with an invalid version format")]
     GrenadInvalidFormatVersion,
