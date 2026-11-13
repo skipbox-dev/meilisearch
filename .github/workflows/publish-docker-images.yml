@@ -76,6 +76,13 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           tags: ${{ matrix.registry }}
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true
+          # Reuse the compiled dependencies (the `cargo chef cook` layer) from the previous build of
+          # the same platform and edition. Only branch builds (nightly) write the cache; tag builds
+          # read the default branch's cache. `mode=max` is needed to export the compiler stage layers.
+          cache-from: type=gha,scope=${{ matrix.edition }}-${{ env.PLATFORM_PAIR }}
+          cache-to: ${{ github.ref_type == 'branch' && format('type=gha,mode=max,ignore-error=true,scope={0}-{1}', matrix.edition, env.PLATFORM_PAIR) || '' }}
+          # Always rebuild the runtime stage so its Alpine packages are up to date.
+          no-cache-filters: runtime
           build-args: |
             COMMIT_SHA=${{ github.sha }}
             COMMIT_DATE=${{ steps.build-metadata.outputs.date }}
