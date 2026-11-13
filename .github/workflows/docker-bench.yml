@@ -1,0 +1,93 @@
+name: Docker build bench (cargo-chef + gha cache)
+
+# Bench copy of the build job of publish-docker-images.yml:
+# manual only, amd64 only, nothing is pushed anywhere.
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [amd64]
+        edition: [community, enterprise]
+        include:
+          - platform: amd64
+            runner: ubuntu-24.04
+          - edition: community
+            registry: getmeili/meilisearch
+            feature-flag: ""
+          - edition: enterprise
+            registry: getmeili/meilisearch-enterprise
+            feature-flag: "--features enterprise"
+
+    permissions: {}
+    steps:
+      - name: Runner hardware
+        run: |
+          echo "BENCH_CPU=$(lscpu | sed -n 's/^Model name: *//p' | head -1) x$(nproc)"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Prepare
+        run: |
+          platform=linux/${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        with:
+          platforms: linux/${{ matrix.platform }}
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ${{ matrix.registry }}
+          flavor: latest=false
+          tags: |
+            type=ref,event=tag
+            type=raw,value=nightly,enable=${{ github.event_name != 'push' }}
+
+      - name: Build (no push)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: build-and-push
+        with:
+          platforms: linux/${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ matrix.registry }}
+          outputs: type=docker
+          # Reuse the compiled dependencies (the `cargo chef cook` layer) from the previous build of
+          # the same platform and edition. Only branch builds (nightly) write the cache; tag builds
+          # read the default branch's cache. `mode=max` is needed to export the compiler stage layers.
+          cache-from: type=gha,scope=${{ matrix.edition }}-${{ env.PLATFORM_PAIR }}
+          cache-to: ${{ github.ref_type == 'branch' && format('type=gha,mode=max,ignore-error=true,scope={0}-{1}', matrix.edition, env.PLATFORM_PAIR) || '' }}
+          # Always rebuild the runtime stage so its Alpine packages are up to date.
+          no-cache-filters: runtime
+          build-args: |
+            COMMIT_SHA=${{ github.sha }}
+            COMMIT_DATE=${{ steps.build-metadata.outputs.date }}
+            GIT_TAG=${{ github.ref_name }}
+            EXTRA_ARGS=${{ matrix.feature-flag }}
+
+
+      - name: Inspect the image
+        env:
+          IMG: ${{ steps.build-and-push.outputs.imageid }}
+        run: |
+          # Everything between the markers is diffed between the current and the new Dockerfile.
+          # Commit SHA, dates and the revision label differ by construction and are masked.
+          mask() { sed -E 's/[0-9a-f]{40}/<sha>/g; s/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z?/<date>/g'; }
+          echo "=== INSPECT BEGIN"
+          docker image inspect --format '{{json .Config}}' "$IMG" | jq -S 'del(.Labels["org.opencontainers.image.revision"], .Labels["org.opencontainers.image.created"])' | mask
+          docker run --rm --entrypoint /bin/meilisearch "$IMG" --version | mask
+          docker run --rm --entrypoint /bin/meilitool "$IMG" --version 2>&1 | mask || true
+          docker run --rm --entrypoint sh "$IMG" -c 'ls -l /meilisearch; for f in /bin/meilisearch /bin/meilitool; do echo "$f $(stat -c %s $f)"; done; ldd /bin/meilisearch; apk info -v 2>/dev/null | sort'
+          cid=$(docker run -d -p 7700:7700 "$IMG")
+          for i in $(seq 1 30); do curl -fsS localhost:7700/health && break; sleep 1; done; echo
+          curl -fsS localhost:7700/version | jq -S 'del(.commitSha, .commitDate)'
+          docker rm -f "$cid" > /dev/null
+          echo "=== INSPECT END"
