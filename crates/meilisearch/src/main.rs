@@ -227,7 +227,7 @@ pub fn print_launch_resume(opt: &Opt, analytics: Analytics, config_read_from: Op
             .map(|config_file_path| config_file_path.display().to_string())
             .unwrap_or_else(|| "none".to_string())
     );
-    eprintln!("Database path:\t\t{:?}", opt.db_path);
+    eprintln!("Database location:\t{:?}", opt.db_path);
     eprintln!("Server listening on:\t\"{}://{}\"", protocol, opt.http_addr);
     eprintln!("Environment:\t\t{:?}", opt.env);
     eprintln!("Commit SHA:\t\t{:?}", build_info.commit_sha1.unwrap_or("unknown"));
